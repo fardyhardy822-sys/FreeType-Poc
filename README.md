@@ -1,4 +1,4 @@
-# PS4-FreeType-WebKit-Poc
+# PS4-FreeType-WebKit-Poc (discarded vector) 
 
 CVE-2025-27363
 
